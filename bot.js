@@ -26,7 +26,7 @@ var shutdown = false;
 var lastWinner = null;
 var socket = io.connect("http://192.155.86.153:8888/");
 console.log('[WDB] Initializing WhiskDiceBot!');
-console.log('[WDB] Connecting to CoinChat...');x
+console.log('[WDB] Connecting to CoinChat...');
 socket.on("connect", function() {
     console.log('[WDB] Connected to CoinChat. Logging in...');
     socket.emit("accounts", {action: "login", username: 'WhiskDiceBot', password: process.env.whiskbotpass});
@@ -70,7 +70,6 @@ socket.on("connect", function() {
             }
         });
     });
-    clearTimeout(reconnectTimeout);
     socket.on("message", function(msg) {
 	console.log('[CoinChat] ' + msg.message)
     });
@@ -106,65 +105,83 @@ socket.on("connect", function() {
 	    }
 	}
     }, 800);
-    var oldchance = chance;
-    var oldpayout = payout;
+    function stripHTML(html) {
+        return html.replace(/<\/?([a-z][a-z0-9]*)\b[^>]*>?/gi, '');
+    }
+    function parseTip(data) {
+        // Is this actually a tip?
+        if (data.indexOf("<span class='label label-success'>has tipped WhiskDiceBot") !== -1) {
+	    data = {message: data}
+	    // We got a tip!
+            data.tipmessage = Number(data.message.substring(data.message.indexOf('%') - 3, data.message.indexOf('%')));
+            if (data.tipmessage > 0 && data.tipmessage < 76) {
+                // Recognised valid percentage.
+                data.chance = data.tipmessage;
+                data.payout = Number((edge / (data.tipmessage / 100)).toFixed(2));
+            }
+            else {
+                data.tipmessage = Number(data.message.substring(data.message.indexOf('%') - 2, data.message.indexOf('%')));
+                if (data.tipmessage > 0 && data.tipmessage < 76) {
+                    // It's something like 1%... grr - but still valid
+                    data.chance = data.tipmessage;
+                    data.payout = Number((edge / (data.tipmessage / 100)).toFixed(2));
+                }
+                else {
+                    data.chance = 50;
+                    data.payout = Number((edge / (data.chance / 100)).toFixed(2));
+                }
+            }
+            data.tipAmount = data.message.substring(58, data.message.indexOf('mBTC') - 1)
+	    // Is this bet gonna work?
+	    data.winAmount = data.tipAmount * data.payout
+	    data.winTip = (data.tipAmount * data.payout) * 0.98 // fees :(
+	    if (started && balance > data.winAmount && 20 > data.winAmount && 1.1 > data.tipAmount) {
+		data.valid = true;
+	    }
+	    else {
+		data.valid = false;
+	    }
+        }
+        else {
+            // No, return null
+	    return null;
+	}
+    }
     setTimeout(function() {
 	socket.on("chat", function(data) {
-	    console.log(data.room + ' | ' + data.user + ' | ' +  data.message + ' (' + data.winbtc + ' mBTC)');
-            if ((data.message.substring(0, 57) === "<span class='label label-success'>has tipped WhiskDiceBot" || data.message.substring(0, 57) === "<span class='label label-success'>has tipped whiskdicebot") && data.room === 'botgames') {
-                data.tipmessage = Number(data.message.substring(data.message.indexOf('%') - 3, data.message.indexOf('%'))); // Try to be a bit forgiving
-		if (data.tipmessage > 0 && data.tipmessage < 76) {
-		    // yay
-		    data.chance = data.tipmessage;
-		    data.payout = Number((edge / (data.tipmessage / 100)).toFixed(2));
-                    //chat('botgames', data.user + ': You selected a ' + chance + '% chance, with a ' + payout + 'x payout.', "090");
-		}
-		else {
-		    data.chance = 50;
-                    data.payout = Number((edge / (data.chance / 100)).toFixed(2));
-                    //chat('botgames', data.user + ': Using default: ' + chance + '% chance, with a ' + payout + 'x payout.', "090");
-                }
-		if (data.tipmessage > 75) {
-		    chat('botgames', "/bold The max percentage is 75%! Betting with 75%...", 'e00');
-		    data.chance = 75;
-                    data.payout = Number((edge / (data.chance / 100)).toFixed(2));
-		}
-                if (started === true && (balance > (data.message.substring(58, data.message.indexOf('mBTC') - 1)) * data.payout) && (20 > (data.message.substring(58, data.message.indexOf('mBTC') - 1)) * data.payout) && (1.1 > (data.message.substring(58, data.message.indexOf('mBTC') - 1)))) {
+	    console.log('[Chat] ' + data.user + ': ' + stripHTML(data.message) + ' (' + data.room + ')');
+	    data.parsedTip = parseTip(data.message)
+            if (data.parsedTip && data.room === 'botgames') {
+		if (data.parsedTip.valid) {
 		    random.generateIntegers(function(integ) {
 			data.rand = integ[0][0];
 			if (data.rand < (data.chance + 1)) {
-			    data.totip = String(Number(data.message.substring(58, data.message.indexOf('mBTC') - 1) * data.payout).toFixed(2));
-                            data.won = String(Number((data.message.substring(58, data.message.indexOf('mBTC') - 1) * data.payout) - Number(data.message.substring(58, data.message.indexOf('mBTC') - 1))).toFixed(2));
-                            tip({user: data.user, room: 'botgames', tip: data.totip, message: 'You win!'});
-			    
+                            tip({user: data.user, room: 'botgames', tip: data.parsedTip.winTip});
 			    db.set('lastwinner', data.user, redis.print);
 			    db.get('winnings/' + data.user, function(err, res) {
 				if (err) {
 				    dbraise(err)
 				}
 				else {
-				    db.set('winnings/' + data.user, Number(res) + (Number(data.won) * 0.98), redis.print)
-                                    chat('botgames', '✔ ' + data.user + ' won ' + (data.won * 0.98).toFixed(2) + ' mBTC! (' + (Number(res) + (Number(data.won) * 0.98)).toFixed(2) +  ' mBTC) [' + data.chance + '%, ' + data.payout + 'x: ' + data.rand + " < " + (data.chance + 1) + ']', "090");
+				    db.set('winnings/' + data.user, Number(res) + data.parsedTip.winTip, redis.print)
+                                    chat('botgames', '✔ ' + data.user + ' won ' + data.parsedTip.winTip + ' mBTC! (' + (Number(res) + data.pasedTip.winTip).toFixed(2) +  ' mBTC) [' + data.chance + '%, ' + data.payout + 'x: ' + data.rand + " < " + (data.chance + 1) + ']', "090");
 				}
 			    });
-                            //chat('botgames', '!; win ' + data.user + ' ' + data.won, "000");
 			    lastWinner = data.user;
                             
 			}
 			else {
-			    
                             db.get('winnings/' + data.user, function(err, res) {
                                 if (err) {
                                     dbraise(err)
                                 }
                                 else {
                                     data.lost = Number(data.message.substring(58, data.message.indexOf('mBTC')));
-				    db.set('winnings/' + data.user, Number(res) - data.lost, redis.print);
-                                    chat('botgames', '✗ ' + data.user + ' lost ' + data.lost.toFixed(2) + ' mBTC! (' + (Number(res) - data.lost).toFixed(2) + ' mBTC) [' + data.chance + '%, ' + data.payout + 'x: ' + data.rand + " < " + (data.chance + 1) + ']', "e00");
+				    db.set('winnings/' + data.user, Number(res) - data.parsedTip.tipAmount, redis.print);
+                                    chat('botgames', '✗ ' + data.user + ' lost ' + data.parsedTip.tipAmount + ' mBTC! (' + (Number(res) - data.parsedTip.tipAmount).toFixed(2) + ' mBTC) [' + data.chance + '%, ' + data.payout + 'x: ' + data.rand + " < " + (data.chance + 1) + ']', "e00");
 				}
                             });
-			    //chat('botgames', '!; loss ' + data.user + ' ' + data.message.substring(58, data.message.indexOf('mBTC') - 1), "000");
-                            db.get('lastwinner', function(err, lastWinner) {
+			    db.get('lastwinner', function(err, lastWinner) {
                                 if (err) {
                                     dbraise(err)
                                 }
@@ -186,22 +203,18 @@ socket.on("connect", function() {
 				    }
                                 }
                             });
-                        }
-                        chance = oldchance;
-                        payout = oldpayout;
+                        };
 		    }, {secure: true, num: 1, min: 1, max: 100}, yell);
 		    
                     socket.emit("getbalance", {});
-		    
 		}
 		else {
                     chat('botgames', '/bold There was an error with your bet! (max bet exceeded, bot balance low, game not enabled)', "e00");
-                    var paid = Number(data.message.substring(58, data.message.indexOf('mBTC') - 1))
-		    if (paid < 0.26) {
-			totip = String(paid);
+		    if (data.parsedTip.tipAmount < 0.26) {
+			totip = String(data.parsedTip.tipAmount);
 		    }
 		    else {
-                        totip = String(Number(data.message.substring(58, data.message.indexOf('mBTC') - 1)) * 0.98)
+                        totip = String(data.parsedTip.tipAmount * 0.98)
 		    }
                     tip({user: data.user, room: 'botgames', tip: totip, message: 'Exceeds balance!'});
 		}
